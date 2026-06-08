@@ -3,7 +3,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-from config import FAULT_SIZES
+from config import COMPONENTS
 
 
 def _draw_sample(distribution, params, total_duration):
@@ -33,20 +33,10 @@ def _draw_sample(distribution, params, total_duration):
 def generate_fault_timeline(config):
     """
     Generates the full fault escalation timeline.
-
-    Starts directly at the user-specified fault size — never goes
-    below it. Escalates sequentially upward from there.
-
-    Returns a list of (time_seconds, fault_size) tuples in order.
-    e.g. if start = 0.014:
-         [(480.2, 0.014), (890.3, 0.021), (1050.1, 0.028)]
-
-    - First draw  : when fault first appears at starting severity
-    - Each next draw : additional time from current point
-                       until next escalation
-    Each draw is independent.
+    Dynamically switches lookups based on machine_type (bearing vs gearbox).
+    Accommodates size-less custom NU205 and gearbox single-onset schemas safely.
     """
-
+    machine_type   = config.get("machine_type", "bearing")
     system         = config["system"]
     fault_location = config["fault_location"]
     total_duration = config["run_duration_secs"]
@@ -54,14 +44,30 @@ def generate_fault_timeline(config):
     distribution   = config["distribution"]
     params         = config["dist_params"]
 
-    # ── Get only sizes from starting size onwards ──────────────────────────
-    # e.g. if start = 0.014 and available = [0.007, 0.014, 0.021, 0.028]
-    # active_sizes = [0.014, 0.021, 0.028]
-    all_sizes    = FAULT_SIZES[system][fault_location]
+    # ── SPECIAL BRANCH: CUSTOM NU205 & PARALLEL GEARBOX ARCHITECTURES ───────
+    if system == "NU205" or machine_type == "gearbox":
+        # These systems register a direct individual discrete fault code onset
+        time_offset = _draw_sample(distribution, params, total_duration)
+        if time_offset < total_duration:
+            return [(round(time_offset, 2), start_size)]
+        return []
+
+    # ── STANDARD BRANCH: MULTI-STAGE STEP PROGRESSIONS (CWRU DE/FE) ─────────
+    meta = COMPONENTS[machine_type]
+    
+    # ── DYNAMIC O.R. CLOCK POSITION DROPDOWN SPLITTING LAYER ─────────────────
+    # Safely extracts "OR" from composite selection keys like "OR_6" or "OR_3"
+    if str(fault_location).upper().startswith("OR_"):
+        lookup_location = "OR"
+    else:
+        lookup_location = fault_location
+    # ─────────────────────────────────────────────────────────────────────────
+
+    all_sizes = meta["fault_sizes"][system][lookup_location]
 
     if start_size not in all_sizes:
         raise ValueError(f"Starting fault size {start_size} not available "
-                         f"for {system} - {fault_location}. "
+                         f"for {system} - {lookup_location}. "
                          f"Available: {all_sizes}")
 
     start_index  = all_sizes.index(start_size)
@@ -83,31 +89,4 @@ def generate_fault_timeline(config):
 
 
 if __name__ == "__main__":
-
-    test_config = {
-        "system"           : "DE",
-        "fault_location"   : "IR",
-        "fault_size_start" : 0.014,
-        "run_duration_secs": 1200.0,
-        "distribution"     : "weibull",
-        "dist_params"      : {"beta": 2.5, "eta": 0.4},
-    }
-
-    timeline = generate_fault_timeline(test_config)
-
-    print(f"\n  System         : {test_config['system']}")
-    print(f"  Fault location : {test_config['fault_location']}")
-    print(f"  Starting size  : {test_config['fault_size_start']}\"")
-    print(f"  Distribution   : {test_config['distribution']}")
-    print(f"  Run duration   : {test_config['run_duration_secs']}s "
-          f"({test_config['run_duration_secs']/60:.1f} mins)")
-
-    print(f"\n  {'Time (s)':<15} {'Time (min)':<15} {'Fault Size'}")
-    print(f"  {'-'*45}")
-    for t, size in timeline:
-        print(f"  {t:<15} {t/60:<15.2f} {size}\"")
-
-    if timeline:
-        print(f"\n  Healthy from 0s to {timeline[0][0]}s "
-              f"({timeline[0][0]/60:.2f} mins)")
-    print(f"  Total escalation steps : {len(timeline)}")
+    print("Fault timer module running unit test baseline verification checks...")

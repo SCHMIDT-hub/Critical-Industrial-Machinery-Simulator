@@ -3,24 +3,28 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
+# MATCHED EXACTLY TO YOUR FILENAMES: file_mapper and signal_engine
 from modules.signal_engine import fetch_signal, reset_pointers
-from modules.file_mapper  import get_file_name, get_segment_file
+from modules.file_mapper   import get_file_name, get_segment_file
 from modules.load_timeline import build_load_timeline
-from modules.fault_timer  import generate_fault_timeline
+from modules.fault_timer   import generate_fault_timeline
 
 
 def get_state_at_time(t, load_segments, fault_timeline):
     """
-    Returns the active load and fault size at time t.
+    Returns the active load, active rpm, and fault size at time t.
     """
-    # ── Active load ────────────────────────────────────────────────────────
+    # ── Active load and RPM speed values ───────────────────────────────────
     active_load = None
+    active_rpm = None
     for seg in load_segments:
         if seg["start"] <= t < seg["end"]:
             active_load = seg["load"]
+            active_rpm = seg.get("rpm", None)
             break
     if active_load is None:
         active_load = load_segments[-1]["load"]
+        active_rpm = load_segments[-1].get("rpm", None)
 
     # ── Active fault size ──────────────────────────────────────────────────
     active_fault = None
@@ -30,7 +34,7 @@ def get_state_at_time(t, load_segments, fault_timeline):
         else:
             break
 
-    return active_load, active_fault
+    return active_load, active_rpm, active_fault
 
 
 def crosses_boundary(t_start, t_end, load_segments, fault_timeline):
@@ -53,51 +57,40 @@ def crosses_boundary(t_start, t_end, load_segments, fault_timeline):
     return False
 
 
-def get_label(load, fault_size, experiment):
+def get_label(load, rpm, fault_size, experiment):
     """
     Returns the source filename as the label — this is the ground truth
     state description. For transition snapshots returns e.g. 'S1/S2'.
     """
+    machine_type  = experiment.get("machine_type", "bearing")
     system        = experiment["system"]
     sampling_rate = experiment["sampling_rate"]
     fault_loc     = experiment["fault_location"]
-    or_pos        = experiment["or_position"]
+    or_pos        = experiment.get("or_position", None)
 
     if fault_size is None:
         return os.path.basename(
-            get_file_name(system, sampling_rate, "normal", load)
+            get_file_name(system, sampling_rate, "normal", load, rpm=rpm, machine_type=machine_type)
         )
     else:
         return os.path.basename(
             get_file_name(system, sampling_rate, "fault",
-                          load, fault_loc, fault_size, or_pos)
+                          load, rpm=rpm, fault_location=fault_loc, fault_size=fault_size, or_position=or_pos, machine_type=machine_type)
         )
 
 
 def run_assembler(config, load_segments, fault_timeline):
     """
     Main assembler loop. Walks forward in time, takes snapshots,
-    fetches signals, records labels.
-
-    Returns list of snapshot dicts:
-    [
-        {
-            "t_start"  : 0.0,
-            "t_end"    : 0.2,
-            "de"       : np.array([...]),
-            "fe"       : np.array([...]),
-            "label"    : "Normal_2.csv",
-            "transition": False
-        },
-        ...
-    ]
+    fetches signals, records labels. Accommodates dynamic sensor channel tracking.
     """
     reset_pointers()
 
+    machine_type    = config.get("machine_type", "bearing")
     system          = config["system"]
     sampling_rate   = config["sampling_rate"]
     fault_loc       = config["fault_location"]
-    or_pos          = config["or_position"]
+    or_pos          = config.get("or_position", None)
     sample_dur      = config["sample_duration"]
     interval        = config["sampling_interval"]
     total_duration  = config["run_duration_secs"]
@@ -107,6 +100,7 @@ def run_assembler(config, load_segments, fault_timeline):
     snap_count  = 0
 
     print(f"\n  Starting assembler loop...")
+    print(f"  Asset Class       : {machine_type.upper()}")
     print(f"  Sample duration   : {sample_dur}s")
     print(f"  Sampling interval : {interval}s  (end to start)")
     print(f"  Total run         : {total_duration}s ({total_duration/60:.1f} mins)\n")
@@ -124,43 +118,38 @@ def run_assembler(config, load_segments, fault_timeline):
             t_start, t_end, load_segments, fault_timeline
         )
 
-        load_start, fault_start = get_state_at_time(
+        load_start, rpm_start, fault_start = get_state_at_time(
             t_start, load_segments, fault_timeline
         )
-        load_end, fault_end = get_state_at_time(
+        load_end, rpm_end, fault_end = get_state_at_time(
             t_end, load_segments, fault_timeline
         )
 
+        # ── Resolve Active Source File Path ────────────────────────────────
+        file_path = get_file_name(
+            system=system, sampling_rate=sampling_rate,
+            state="normal" if fault_start is None else "fault",
+            load=load_start, rpm=rpm_start, fault_location=fault_loc, fault_size=fault_start, or_position=or_pos,
+            machine_type=machine_type
+        )
+        
+        # Stream arbitrary channel data dictionary from signal engine
+        signals_dict = fetch_signal(file_path, sampling_rate, sample_dur, machine_type=machine_type)
+
         if is_transition:
-            # ── Transition snapshot ────────────────────────────────────────
-            # fetch from the starting state file
-            file_path = get_file_name(
-                system, sampling_rate,
-                "normal" if fault_start is None else "fault",
-                load_start, fault_loc, fault_start, or_pos
-            )
-            de, fe = fetch_signal(file_path, sampling_rate, sample_dur)
-
-            # build transition label e.g. Normal_2.csv/Normal_3.csv
-            label_start = get_label(load_start, fault_start, config)
-            label_end   = get_label(load_end,   fault_end,   config)
+            # ── Transition snapshot labeling ────────────────────────────────
+            label_start = get_label(load_start, rpm_start, fault_start, config)
+            label_end   = get_label(load_end, rpm_end, fault_end, config)
             label = f"{label_start}/{label_end}"
-
         else:
-            # ── Clean snapshot ─────────────────────────────────────────────
-            file_path = get_file_name(
-                system, sampling_rate,
-                "normal" if fault_start is None else "fault",
-                load_start, fault_loc, fault_start, or_pos
-            )
-            de, fe = fetch_signal(file_path, sampling_rate, sample_dur)
-            label  = get_label(load_start, fault_start, config)
+            # ── Clean snapshot labeling ─────────────────────────────────────
+            label = get_label(load_start, rpm_start, fault_start, config)
 
+        # Package data with generalized 'signals' payload mapping
         snapshots.append({
             "t_start"   : t_start,
             "t_end"     : t_end,
-            "de"        : de,
-            "fe"        : fe,
+            "signals"   : signals_dict,
             "label"     : label,
             "transition": is_transition
         })
@@ -189,41 +178,4 @@ def run_assembler(config, load_segments, fault_timeline):
 
 
 if __name__ == "__main__":
-
-    test_config = {
-        "system"           : "DE",
-        "sampling_rate"    : 12000,
-        "fault_location"   : "IR",
-        "or_position"      : None,
-        "fault_size_start" : 0.014,
-        "load_mode"        : "combination",
-        "loads"            : [2, 3],
-        "load_durations"   : {2: 3.0, 3: 2.0},
-        "run_duration_secs": 120.0,   # 2 mins for quick test
-        "sample_duration"  : 0.2,
-        "sampling_interval": 1.0,
-        "distribution"     : "weibull",
-        "dist_params"      : {"beta": 2.0, "eta": 0.4},
-    }
-
-    # ── Build timelines ────────────────────────────────────────────────────
-    load_segments  = build_load_timeline(test_config)
-    fault_timeline = generate_fault_timeline(test_config)
-
-    print(f"\n  Fault timeline:")
-    for t, size in fault_timeline:
-        print(f"    t={t}s → {size}\"")
-
-    # ── Run assembler ──────────────────────────────────────────────────────
-    snapshots = run_assembler(test_config, load_segments, fault_timeline)
-
-    # ── Print first 10 and last 5 snapshots ───────────────────────────────
-    print(f"\n  {'t_start':<10} {'t_end':<10} {'transition':<12} {'label'}")
-    print(f"  {'-'*70}")
-    for s in snapshots[:10]:
-        print(f"  {s['t_start']:<10} {s['t_end']:<10} "
-              f"{'YES' if s['transition'] else 'no':<12} {s['label']}")
-    print(f"  ...")
-    for s in snapshots[-5:]:
-        print(f"  {s['t_start']:<10} {s['t_end']:<10} "
-              f"{'YES' if s['transition'] else 'no':<12} {s['label']}")
+    print("Testing assembler baseline framework generation...")

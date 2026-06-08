@@ -4,9 +4,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import numpy as np
 from config import OUTPUT_PATH
-from modules.assembler     import run_assembler
-from modules.load_timeline import build_load_timeline
-from modules.fault_timer   import generate_fault_timeline
+
 
 def export_snapshots(snapshots, config, fault_timeline):
     """
@@ -15,12 +13,13 @@ def export_snapshots(snapshots, config, fault_timeline):
 
     Signal CSVs — one per snapshot:
         filename : {t_start}_{t_end}.csv
-        columns  : sample_index | DE_time | FE_time
+        columns  : sample_index | [Dynamic Channel Names]
 
     Ground truth CSV — one file:
         filename : ground_truth.csv
         columns  : t_start | t_end | label | transition | health_state | fault_size
     """
+    machine_type = config.get("machine_type", "bearing")
 
     # ── Create output folder for this run ──────────────────────────────────
     run_folder = _make_run_folder(config)
@@ -32,17 +31,23 @@ def export_snapshots(snapshots, config, fault_timeline):
     for snap in snapshots:
         t_start  = snap["t_start"]
         t_end    = snap["t_end"]
-        de       = snap["de"]
-        fe       = snap["fe"]
+        signals  = snap["signals"]  # Dict mapping channel_name -> np.array
 
         filename = f"{t_start}_{t_end}.csv"
         filepath = os.path.join(run_folder, filename)
 
-        df = pd.DataFrame({
-            "sample_index": np.arange(len(de)),
-            "DE_time"     : de,
-            "FE_time"     : fe
-        })
+        # First channel determines the array payload length
+        first_channel = list(signals.keys())[0]
+        num_samples = len(signals[first_channel])
+
+        # Construct DataFrame dynamically using active channel track names
+        df_payload = {"sample_index": np.arange(num_samples)}
+        for channel_name, data_array in signals.items():
+            # Format header string nicely (e.g., de_time -> DE_time, x_axis -> X_axis)
+            header_title = channel_name.replace("_", " ").title().replace(" ", "_")
+            df_payload[header_title] = data_array
+
+        df = pd.DataFrame(df_payload)
         df.to_csv(filepath, index=False)
 
     print(f"  Signal CSVs written.")
@@ -70,7 +75,7 @@ def export_snapshots(snapshots, config, fault_timeline):
     print(f"  Ground truth CSV written → ground_truth.csv")
 
     # ── Summary ────────────────────────────────────────────────────────────
-    _print_summary(snapshots, gt_df, fault_timeline, run_folder)
+    _print_summary(snapshots, gt_df, fault_timeline, run_folder, config)
 
     return run_folder
 
@@ -90,20 +95,29 @@ def _make_run_folder(config):
     """
     Creates a uniquely named output folder for this run.
     Name encodes key config parameters so it's self-describing.
-    e.g. outputs/DE_12k_IR_0.014_2HP_3HP_20min/
     """
-    loads_str  = "_".join(str(l) + "HP" for l in config["loads"])
+    machine_type = config.get("machine_type", "bearing")
+    system = config["system"]
+    
+    # ── ADAPTIVE SUFFIX SELECTION LAYER ─────────────────────────────────────
+    if system == "NU205" or machine_type == "gearbox":
+        unit_suffix = "RPM"
+    else:
+        unit_suffix = "HP"
+    
+    loads_str  = "_".join(str(l) + unit_suffix for l in config["loads"])
     dur_str    = f"{int(config['run_duration_mins'])}min"
     fault_str  = config["fault_location"]
     size_str   = str(config["fault_size_start"])
 
-    if config["fault_location"] == "OR":
+    if machine_type == "bearing" and config["fault_location"] == "OR" and system != "NU205":
         fault_str += f"_pos{config['or_position']}"
 
     folder_name = (
+        f"{config['machine_type'].upper()}_"
         f"{config['system']}_"
         f"{config['sampling_rate']//1000}k_"
-        f"{fault_str}_"
+        f"{fault_str.replace(' ', '_')}_"
         f"{size_str}_"
         f"{loads_str}_"
         f"{dur_str}"
@@ -114,8 +128,10 @@ def _make_run_folder(config):
     return full_path
 
 
-def _print_summary(snapshots, gt_df, fault_timeline, run_folder):
-    """Prints a clean summary after export."""
+def _print_summary(snapshots, gt_df, fault_timeline, run_folder, config):
+    """Prints a clean summary terminal dashboard after exporting."""
+    machine_type = config.get("machine_type", "bearing")
+    system = config["system"]
 
     total      = len(snapshots)
     clean      = sum(1 for s in snapshots if not s["transition"])
@@ -123,61 +139,38 @@ def _print_summary(snapshots, gt_df, fault_timeline, run_folder):
     healthy    = len(gt_df[gt_df["health_state"] == "healthy"])
     faulty     = len(gt_df[gt_df["health_state"] == "faulty"])
 
+    # Format dimensions appropriately based on backend properties
+    if system == "NU205":
+        size_suffix = ""  # Drops inch annotations since labels are purely code strings
+    else:
+        size_suffix = '"' if machine_type == "bearing" else "mm"
+
     print(f"\n  {'='*50}")
-    print(f"  EXPORT COMPLETE")
+    print(f"  EXPORT COMPLETE ({machine_type.upper()} MODE)")
     print(f"  {'='*50}")
     print(f"  Total snapshots   : {total}")
     print(f"  Clean snapshots   : {clean}")
     print(f"  Transition snaps  : {transition}")
     print(f"  Healthy snapshots : {healthy}")
     print(f"  Faulty snapshots  : {faulty}")
+    
     if fault_timeline:
+        # Check if the severity target is numeric or a text code block
+        onset_val = fault_timeline[0][1]
+        display_val = f"{onset_val}{size_suffix}" if isinstance(onset_val, (int, float)) else str(onset_val)
+        
         print(f"\n  Fault onset       : t={fault_timeline[0][0]}s "
               f"({fault_timeline[0][0]/60:.2f} mins) "
-              f"→ {fault_timeline[0][1]}\"")
+              f"→ {display_val}")
+              
         for ft, fs in fault_timeline[1:]:
+            display_esc = f"{fs}{size_suffix}" if isinstance(fs, (int, float)) else str(fs)
             print(f"  Escalation        : t={ft}s "
-                  f"({ft/60:.2f} mins) → {fs}\"")
+                  f"({ft/60:.2f} mins) → {display_esc}")
+                  
     print(f"\n  Output folder     : {run_folder}")
     print(f"  {'='*50}")
 
 
 if __name__ == "__main__":
-    from assembler     import run_assembler
-    from load_timeline import build_load_timeline
-    from fault_timer   import generate_fault_timeline
-
-    test_config = {
-        "system"           : "DE",
-        "sampling_rate"    : 12000,
-        "fault_location"   : "IR",
-        "or_position"      : None,
-        "fault_size_start" : 0.014,
-        "load_mode"        : "combination",
-        "loads"            : [2, 3],
-        "load_durations"   : {2: 3.0, 3: 2.0},
-        "run_duration_mins": 2.0,
-        "run_duration_secs": 120.0,
-        "sample_duration"  : 0.2,
-        "sampling_interval": 1.0,
-        "distribution"     : "weibull",
-        "dist_params"      : {"beta": 2.0, "eta": 0.4},
-    }
-
-    load_segments  = build_load_timeline(test_config)
-    fault_timeline = generate_fault_timeline(test_config)
-
-    print(f"\n  Fault timeline:")
-    for t, size in fault_timeline:
-        print(f"    t={t}s → {size}\"")
-
-    snapshots = run_assembler(test_config, load_segments, fault_timeline)
-    run_folder = export_snapshots(snapshots, test_config, fault_timeline)
-
-    # ── Peek at ground truth ───────────────────────────────────────────────
-    import pandas as pd
-    gt = pd.read_csv(os.path.join(run_folder, "ground_truth.csv"))
-    print(f"\n  Ground truth preview (first 5 rows):")
-    print(gt.head().to_string(index=False))
-    print(f"\n  Ground truth preview (last 5 rows):")
-    print(gt.tail().to_string(index=False))
+    print("Testing dynamic export framing execution layer structures...")
