@@ -15,7 +15,7 @@ def _draw_sample(distribution, params, total_duration):
     """
     if distribution == "weibull":
         beta   = params["beta"]
-        eta    = params["eta"]
+        eta    = params["eta"]  # If eta is absolute seconds, drop the "* total_duration" multiplier below
         sample = np.random.weibull(beta) * eta * total_duration
 
     elif distribution == "normal":
@@ -46,7 +46,6 @@ def generate_fault_timeline(config):
 
     # ── SPECIAL BRANCH: CUSTOM NU205 & PARALLEL GEARBOX ARCHITECTURES ───────
     if system == "NU205" or machine_type == "gearbox":
-        # These systems register a direct individual discrete fault code onset
         time_offset = _draw_sample(distribution, params, total_duration)
         if time_offset < total_duration:
             return [(round(time_offset, 2), start_size)]
@@ -55,13 +54,10 @@ def generate_fault_timeline(config):
     # ── STANDARD BRANCH: MULTI-STAGE STEP PROGRESSIONS (CWRU DE/FE) ─────────
     meta = COMPONENTS[machine_type]
     
-    # ── DYNAMIC O.R. CLOCK POSITION DROPDOWN SPLITTING LAYER ─────────────────
-    # Safely extracts "OR" from composite selection keys like "OR_6" or "OR_3"
     if str(fault_location).upper().startswith("OR_"):
         lookup_location = "OR"
     else:
         lookup_location = fault_location
-    # ─────────────────────────────────────────────────────────────────────────
 
     all_sizes = meta["fault_sizes"][system][lookup_location]
 
@@ -71,13 +67,18 @@ def generate_fault_timeline(config):
                          f"Available: {all_sizes}")
 
     start_index  = all_sizes.index(start_size)
-    active_sizes = all_sizes[start_index:]   # from start size onwards only
+    active_sizes = all_sizes[start_index:]   
 
     timeline     = []
     current_time = 0.0
 
     for size in active_sizes:
-        time_offset   = _draw_sample(distribution, params, total_duration)
+        # FIXED: Sample across the remaining available time horizon rather than the whole duration
+        remaining_duration = total_duration - current_time
+        if remaining_duration <= 0.1:
+            break
+            
+        time_offset = _draw_sample(distribution, params, remaining_duration)
         current_time += time_offset
 
         if current_time >= total_duration:

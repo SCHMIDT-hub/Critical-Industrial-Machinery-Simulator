@@ -1,176 +1,139 @@
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sys
 import pandas as pd
-import numpy as np
-from config import OUTPUT_PATH
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import OUTPUT_PATH, COMPONENTS
+from modules.file_mapper import get_segment_file
 
 
 def export_snapshots(snapshots, config, fault_timeline):
     """
-    Exports all snapshots to individual CSV files and
-    writes one ground_truth.csv covering the full run.
-
-    Signal CSVs — one per snapshot:
-        filename : {t_start}_{t_end}.csv
-        columns  : sample_index | [Dynamic Channel Names]
-
-    Ground truth CSV — one file:
-        filename : ground_truth.csv
-        columns  : t_start | t_end | label | transition | health_state | fault_size
+    Slices and exports snapshot CSV files by calculating exact time-proportional 
+    row spans across an arbitrary number of overlapping transient states.
     """
-    machine_type = config.get("machine_type", "bearing")
+    fault_type = config["fault_location"].strip().lower()  
+    severity = config["fault_size_start"]
+    sampling_rate_khz = int(config["sampling_rate"] / 1000)
+    sampling_rate = config["sampling_rate"]
+    sample_duration = config["sample_duration"]
+    
+    run_name = f"GEARBOX_parallel_{sampling_rate_khz}k_{fault_type.replace(' ', '_')}_{severity}"
+    run_dir = os.path.join(OUTPUT_PATH, run_name)
+    os.makedirs(run_dir, exist_ok=True)
+    
+    src_duration = float(COMPONENTS[config["machine_type"]]["source_data_duration"])
+    window_points = int(sample_duration * sampling_rate)
 
-    # ── Create output folder for this run ──────────────────────────────────
-    run_folder = _make_run_folder(config)
-    print(f"\n  Output folder: {run_folder}")
-
-    # ── Export individual signal CSVs ──────────────────────────────────────
-    print(f"  Writing {len(snapshots)} signal CSVs...")
-
+    # ── STEP 1: LOG ENHANCED GROUND TRUTH INDEX ─────────────────────────────
+    meta_rows = []
     for snap in snapshots:
-        t_start  = snap["t_start"]
-        t_end    = snap["t_end"]
-        signals  = snap["signals"]  # Dict mapping channel_name -> np.array
-
-        filename = f"{t_start}_{t_end}.csv"
-        filepath = os.path.join(run_folder, filename)
-
-        # First channel determines the array payload length
-        first_channel = list(signals.keys())[0]
-        num_samples = len(signals[first_channel])
-
-        # Construct DataFrame dynamically using active channel track names
-        df_payload = {"sample_index": np.arange(num_samples)}
-        for channel_name, data_array in signals.items():
-            # Format header string nicely (e.g., de_time -> DE_time, x_axis -> X_axis)
-            header_title = channel_name.replace("_", " ").title().replace(" ", "_")
-            df_payload[header_title] = data_array
-
-        df = pd.DataFrame(df_payload)
-        df.to_csv(filepath, index=False)
-
-    print(f"  Signal CSVs written.")
-
-    # ── Export ground truth CSV ────────────────────────────────────────────
-    gt_rows = []
-    for snap in snapshots:
-        t_start      = snap["t_start"]
-        fault_size   = _get_fault_size_at(t_start, fault_timeline)
-        health_state = "faulty" if fault_size is not None else "healthy"
-
-        gt_rows.append({
-            "t_start"     : snap["t_start"],
-            "t_end"       : snap["t_end"],
-            "label"       : snap["label"],
-            "transition"  : snap["transition"],
-            "health_state": health_state,
-            "fault_size"  : fault_size if fault_size is not None else "—"
+        meta_rows.append({
+            "Snapshot_File": f"{snap['timestamp']:.1f}_{snap['end_timestamp']:.1f}.csv",
+            "Simulated_Start_Seconds": snap["timestamp"],
+            "RPM_State_Profile": snap["rpm_state"],
+            "Composition_Type": snap["state_classification"],
+            "Fault_Severity": snap["fault_severity"],
+            "Manifest_Summary": str([(m["rpm"], m["pool_offset"]) for m in snap["manifest"]])
         })
-
-    gt_df    = pd.DataFrame(gt_rows)
-    gt_path  = os.path.join(run_folder, "ground_truth.csv")
-    gt_df.to_csv(gt_path, index=False)
-
-    print(f"  Ground truth CSV written → ground_truth.csv")
-
-    # ── Summary ────────────────────────────────────────────────────────────
-    _print_summary(snapshots, gt_df, fault_timeline, run_folder, config)
-
-    return run_folder
-
-
-def _get_fault_size_at(t, fault_timeline):
-    """Returns the active fault size at time t, or None if healthy."""
-    active = None
-    for (fault_time, fault_size) in fault_timeline:
-        if t >= fault_time:
-            active = fault_size
-        else:
-            break
-    return active
-
-
-def _make_run_folder(config):
-    """
-    Creates a uniquely named output folder for this run.
-    Name encodes key config parameters so it's self-describing.
-    """
-    machine_type = config.get("machine_type", "bearing")
-    system = config["system"]
-    
-    # ── ADAPTIVE SUFFIX SELECTION LAYER ─────────────────────────────────────
-    if system == "NU205" or machine_type == "gearbox":
-        unit_suffix = "RPM"
-    else:
-        unit_suffix = "HP"
-    
-    loads_str  = "_".join(str(l) + unit_suffix for l in config["loads"])
-    dur_str    = f"{int(config['run_duration_mins'])}min"
-    fault_str  = config["fault_location"]
-    size_str   = str(config["fault_size_start"])
-
-    if machine_type == "bearing" and config["fault_location"] == "OR" and system != "NU205":
-        fault_str += f"_pos{config['or_position']}"
-
-    folder_name = (
-        f"{config['machine_type'].upper()}_"
-        f"{config['system']}_"
-        f"{config['sampling_rate']//1000}k_"
-        f"{fault_str.replace(' ', '_')}_"
-        f"{size_str}_"
-        f"{loads_str}_"
-        f"{dur_str}"
-    )
-
-    full_path = os.path.join(OUTPUT_PATH, folder_name)
-    os.makedirs(full_path, exist_ok=True)
-    return full_path
-
-
-def _print_summary(snapshots, gt_df, fault_timeline, run_folder, config):
-    """Prints a clean summary terminal dashboard after exporting."""
-    machine_type = config.get("machine_type", "bearing")
-    system = config["system"]
-
-    total      = len(snapshots)
-    clean      = sum(1 for s in snapshots if not s["transition"])
-    transition = sum(1 for s in snapshots if s["transition"])
-    healthy    = len(gt_df[gt_df["health_state"] == "healthy"])
-    faulty     = len(gt_df[gt_df["health_state"] == "faulty"])
-
-    # Format dimensions appropriately based on backend properties
-    if system == "NU205":
-        size_suffix = ""  # Drops inch annotations since labels are purely code strings
-    else:
-        size_suffix = '"' if machine_type == "bearing" else "mm"
-
-    print(f"\n  {'='*50}")
-    print(f"  EXPORT COMPLETE ({machine_type.upper()} MODE)")
-    print(f"  {'='*50}")
-    print(f"  Total snapshots   : {total}")
-    print(f"  Clean snapshots   : {clean}")
-    print(f"  Transition snaps  : {transition}")
-    print(f"  Healthy snapshots : {healthy}")
-    print(f"  Faulty snapshots  : {faulty}")
-    
-    if fault_timeline:
-        # Check if the severity target is numeric or a text code block
-        onset_val = fault_timeline[0][1]
-        display_val = f"{onset_val}{size_suffix}" if isinstance(onset_val, (int, float)) else str(onset_val)
         
-        print(f"\n  Fault onset       : t={fault_timeline[0][0]}s "
-              f"({fault_timeline[0][0]/60:.2f} mins) "
-              f"→ {display_val}")
-              
-        for ft, fs in fault_timeline[1:]:
-            display_esc = f"{fs}{size_suffix}" if isinstance(fs, (int, float)) else str(fs)
-            print(f"  Escalation        : t={ft}s "
-                  f"({ft/60:.2f} mins) → {display_esc}")
-                  
-    print(f"\n  Output folder     : {run_folder}")
-    print(f"  {'='*50}")
+    df_meta = pd.DataFrame(meta_rows)
+    meta_file_path = os.path.join(run_dir, f"{run_name}_ground_truth.csv")
+    df_meta.to_csv(meta_file_path, index=False)
+    
+    cached_file_data = {}
+    print(f"\n  [Export Pipeline] Slicing high-fidelity proportional streams...")
 
+    # ── STEP 2: EXECUTE TIME-PROPORTIONAL ROW SLICING ──────────────────────
+    for snap in snapshots:
+        w_start = snap["timestamp"]
+        w_end = snap["end_timestamp"]
+        
+        sliced_blocks = []
+        accumulated_rows = 0
 
-if __name__ == "__main__":
-    print("Testing dynamic export framing execution layer structures...")
+        for i, item in enumerate(snap["manifest"]):
+            speed = item["rpm"]
+            
+            chunk_start = max(w_start, item["seg_start"])
+            chunk_end = min(w_end, item["seg_end"])
+            chunk_duration = chunk_end - chunk_start
+            
+            if i == len(snap["manifest"]) - 1:
+                allocated_rows = window_points - accumulated_rows
+            else:
+                allocated_rows = int(round((chunk_duration / sample_duration) * window_points))
+            
+            if allocated_rows <= 0:
+                continue
+                
+            accumulated_rows += allocated_rows
+
+            mock_segment = {"start": chunk_start, "load": 0, "rpm": speed}
+            
+            try:
+                # FIXED: Build a verified config map structure matching file_mapper expectations
+                resolved_config_map = {
+                    "machine_type": config.get("machine_type", "gearbox"),
+                    "system": config.get("system", "parallel"),
+                    "sampling_rate": config.get("sampling_rate", 16000),
+                    "fault_location": config.get("fault_location", "normal"),
+                    "or_position": config.get("or_position", None)
+                }
+                
+                target_file_path = get_segment_file(mock_segment, resolved_config_map, fault_timeline)
+                
+                if target_file_path not in cached_file_data:
+                    if "normal_0" in os.path.basename(target_file_path) or speed == 0:
+                        cached_file_data[target_file_path] = None
+                    else:
+                        if not os.path.exists(target_file_path):
+                            print(f"⚠️  [File Missing]: Could not open path: {target_file_path}. Filling window with zeros.")
+                            cached_file_data[target_file_path] = None
+                        else:
+                            if target_file_path.lower().endswith('.xlsx'):
+                                raw_df = pd.read_excel(target_file_path)
+                            else:
+                                raw_df = pd.read_csv(target_file_path)
+                            
+                            # FIXED: Normalize all header names to lowercase right after reading 
+                            # to ensure smooth column mapping during matrix concat steps
+                            raw_df.columns = [str(c).strip().lower() for c in raw_df.columns]
+                            cached_file_data[target_file_path] = raw_df
+                
+                df_src = cached_file_data[target_file_path]
+            except Exception as e:
+                print(f"⚠️  [File Map Router Exception]: {e}")
+                df_src = None
+            
+            total_src_rows = len(df_src) if df_src is not None else 100000
+            start_idx = int((item["pool_offset"] / src_duration) * total_src_rows)
+            end_idx = min(start_idx + allocated_rows, total_src_rows)
+            
+            if df_src is not None:
+                time_keywords = ["time", "stamp", "date", "parsed_time", "elapsed_seconds", "timestamp"]
+                signal_cols = [c for c in df_src.columns if c not in time_keywords and "load" not in c and "rpm" not in c]
+                slice_chunk = df_src.iloc[start_idx:end_idx][signal_cols].reset_index(drop=True)
+                
+                if len(slice_chunk) < allocated_rows:
+                    shortage = allocated_rows - len(slice_chunk)
+                    padding = pd.DataFrame(0.0, index=range(shortage), columns=slice_chunk.columns)
+                    slice_chunk = pd.concat([slice_chunk, padding], ignore_index=True)
+            else:
+                target_channels = COMPONENTS[config["machine_type"]]["sensor_channels"]
+                slice_chunk = pd.DataFrame(0.0, index=range(allocated_rows), columns=target_channels)
+
+            sliced_blocks.append(slice_chunk)
+
+        # Uniform structure concatenation
+        df_final_slice = pd.concat(sliced_blocks, ignore_index=True) if sliced_blocks else pd.DataFrame()
+        
+        # Enforce consistent uppercase names (CH 1, CH 2, CH 3) across the generated CSV files
+        if not df_final_slice.empty:
+            df_final_slice.columns = [str(c).upper() for c in df_final_slice.columns]
+
+        filename = f"{w_start:.1f}_{w_end:.1f}.csv"
+        df_final_slice.to_csv(os.path.join(run_dir, filename), index=False)
+
+    print(f"  [Export Complete] Run files successfully generated inside: {run_dir}")
+    return run_dir

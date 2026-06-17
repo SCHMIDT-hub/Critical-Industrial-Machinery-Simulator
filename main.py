@@ -1,5 +1,7 @@
 import sys
 import os
+import pandas as pd
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from config import OUTPUT_PATH
 from modules.user_input    import get_user_input
@@ -13,22 +15,24 @@ def run_simulator():
 
     while True:
         # ── Step 1: Complete Sequenced User Interaction ───────────────────
-        # This prompts for core config, terminal values, and profile sheets
         config = get_user_input()
-        machine_type = config.get("machine_type", "bearing")
-        system = config["system"]
         
-        # Dynamically switch the display string suffix based on asset class
-        if system == "NU205" or machine_type == "gearbox":
-            size_suffix = ""  # Drops unit markers for pure string fault identifiers
-        else:
-            size_suffix = '"' if machine_type == "bearing" else "mm"
+        # Hardcoded suffix since architecture is now exclusively gearbox components
+        size_suffix = ""  
 
         # ── Step 2: Build Operational Load Timeline ───────────────────────
-        # Runs first to map operational speeds before wear evaluation
         print("\n  Parsing operational speed/load profile steps...")
         load_segments = build_load_timeline(config)
         print_timeline_summary(load_segments, config)
+
+        # ── STREAMLINED Y/N CONFIRMATION GATE ────────────────────────────────
+        # Graph plotting removed. Evaluates y/n input loops directly.
+        proceed = input("\nDoes the extracted profile look correct? Proceed to signal sampling? (y / n): ").strip().lower()
+        if proceed not in ["y", "yes"]:
+            print("\n[Operation Aborted] Exiting simulator safely so you can check your input data columns.")
+            print("="*50)
+            break
+        # ─────────────────────────────────────────────────────────────────────
 
         # ── Step 3: Generate Degradation Fault Timeline ───────────────────
         print("\n  Simulating stochastically scheduled fault timeline...")
@@ -48,8 +52,8 @@ def run_simulator():
 
         # ── Step 6: Loop Execution Query ───────────────────────────────────
         print("\n" + "="*50)
-        again = input("  Run another experiment profile? (yes / no): ").strip().lower()
-        if again != "yes":
+        again = input("  Run another experiment profile? (y / n): ").strip().lower()
+        if again not in ["y", "yes"]:
             print("\n  Simulator exited cleanly. Outputs archived within:")
             print(f"  {OUTPUT_PATH}")
             break

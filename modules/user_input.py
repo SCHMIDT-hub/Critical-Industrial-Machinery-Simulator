@@ -1,11 +1,10 @@
-import sys
 import os
+import sys
 import subprocess
 import time
 import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import ASSET_MENU
 
 
 def open_file_safely(file_path):
@@ -24,69 +23,95 @@ def open_file_safely(file_path):
 
 def get_user_input():
     """
-    Orchestrates the logical configuration pipeline from core hardware definitions,
-    to terminal global runtime constraints, to sequential operational profile spreadsheets.
+    Orchestrates the logical configuration pipeline from core gearbox hardware definitions,
+    to terminal global runtime constraints, to raw machine log file collection.
     """
     print("\n==================================================")
-    print("      EXCEL-DRIVEN POWERTRAIN FAULT SIMULATOR")
+    print("      TELEMETRY-DRIVEN POWERTRAIN FAULT SIMULATOR")
     print("==================================================")
     
-    # ── TIER 1: CHOOSE ASSET CLASS ───────────────────────────────────────────
+    # ── TIER 1: CHOOSE ASSET CLASS (LOCKED TO GEARBOX) ───────────────────────
     print("\nSelect Main Asset Class:")
-    print("  1 ── Rolling Element Bearings")
-    print("  2 ── Gearbox Assemblies")
+    print("  1 ── Gearbox Assemblies [ACTIVE]")
     
     while True:
-        class_choice = input("\nEnter Asset Class Serial Number (1-2): ").strip()
-        if class_choice in ["1", "2"]:
+        class_choice = input("\nEnter Asset Class Serial Number (or press ENTER for default): ").strip()
+        if class_choice in ["1", ""]:
+            print("  --> Machinery Class Initialized: GEARBOX TRANSMISSION ARCHITECTURE")
             break
-        print("  Invalid selection. Please input 1 for Bearing or 2 for Gearbox.")
+        print("  Invalid selection. Currently, only the Gearbox framework is active. Please press 1.")
 
     # ── TIER 2: CHOOSE SPECIFIC SUB-SYSTEM COMPONENTS ────────────────────────
-    if class_choice == "1":
-        print("\nSelect Bearing Asset Sub-system Component:")
-        print("  1 ── Drive End Bearing (6205-2RS JEM SKF)")
-        print("  2 ── Fan End Bearing (6203-2RS JEM SKF)")
-        print("  3 ── NU205 Bearing Asset Component")
-        
-        while True:
-            sub_choice = input("\nEnter Sub-system Option (1-3): ").strip()
-            if sub_choice in ["1", "2", "3"]:
-                menu_key = sub_choice 
-                break
-            print("  Invalid selection. Please input a number between 1 and 3.")
-            
-    else:
-        print("\nSelect Gearbox Asset Sub-system Component:")
-        print("  1 ── Parallel Gearbox Assembly")
-        
-        while True:
-            sub_choice = input("\nEnter Sub-system Option (1): ").strip()
-            if sub_choice == "1":
-                menu_key = "4"  # Maps back to Parallel Gearbox in ASSET_MENU
-                break
-            print("  Invalid selection. Please input 1 for Parallel Gearbox.")
+    print("\nSelect Gearbox Asset Sub-system Component:")
+    print("  1 ── Parallel Gearbox Assembly [ACTIVE]")
+    
+    while True:
+        sub_choice = input("\nEnter Sub-system Option (or press ENTER for default): ").strip()
+        if sub_choice in ["1", ""]:
+            print("  --> Drivetrain Rig Initialized: PARALLEL SHAFT CONFIGURATION")
+            break
+        print("  Invalid selection. Currently, only the Parallel Shaft rig is active. Please press 1.")
 
-    asset_meta = ASSET_MENU[menu_key]
-    config_file_path = asset_meta["config_file"]
-    profile_file_path = asset_meta["profile_file"]
+    # Route dynamically to the Templates subfolder
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    config_file_path = os.path.join(base_dir, "Templates", "config_gearbox.xlsx")
+    
+    config = {
+        "machine_type": "gearbox",
+        "system": "parallel",  # Standardized to lowercase to match config.py lookup structures
+        "config_file_path": config_file_path
+    }
 
     # ── STEP 1: CORE HARDWARE PARAMETERS EXCEL SHEET ──────────────────────────
-    print(f"\n[Action Required] Opening hardware asset config template: {os.path.basename(config_file_path)}")
-    print("--> Set your Sampling Rate, Fault Type, and Size in Column B, then SAVE and CLOSE the file...")
-    open_file_safely(config_file_path)
+    if os.path.exists(config_file_path):
+        print(f"\n[Action Required] Opening hardware asset config template: {os.path.basename(config_file_path)}")
+        print("--> Set your Parameters in Column B, then SAVE and CLOSE the file...")
+        open_file_safely(config_file_path)
+    else:
+        raise FileNotFoundError(f"[System Error]: Configuration file not found at expected path: {config_file_path}")
 
-    input("\nPress [ENTER] here in the terminal *ONLY AFTER* you have Saved and Closed that Excel sheet...")
+    input("\nPress [ENTER] here in the terminal *ONLY AFTER* you have Saved and Closed that Excel sheet... ")
     time.sleep(1.0)
 
     print("  Parsing hardware configuration specifications...")
-    df_cfg = pd.read_excel(config_file_path, sheet_name=0, index_col=0)
-    df_cfg.columns = [str(c).strip() for c in df_cfg.columns]
-    
-    if df_cfg["User Selection Value"].isna().any():
-        blank_fields = df_cfg[df_cfg["User Selection Value"].isna()].index.tolist()
-        print(f"\n[Excel Configuration Error]: Blank values found in '{os.path.basename(config_file_path)}': {blank_fields}")
-        sys.exit(1)
+    try:
+        df_cfg = pd.read_excel(config_file_path, sheet_name=0)
+        
+        # Strip string columns to avoid whitespace matching issues
+        df_cfg.iloc[:, 0] = df_cfg.iloc[:, 0].astype(str).str.strip()
+        
+        # Create the raw dictionary lookup map
+        cfg_dict = dict(zip(df_cfg.iloc[:, 0], df_cfg.iloc[:, 1]))
+        
+        # ── EXPLICIT HARDWARE PARAMETERS SAFEGUARD ───────────────────────────
+        required_keys = [
+            "Sampling Rate", 
+            "Fault Type", 
+            "Fault Size", 
+            "Sampling Window (s)", 
+            "Sampling Interval (s)"
+        ]
+        
+        missing_keys = []
+        for key in required_keys:
+            # Check if the key is completely missing, or if its value is null/NaN/empty string
+            if key not in cfg_dict or pd.isna(cfg_dict[key]) or str(cfg_dict[key]).strip() == "":
+                missing_keys.append(key)
+                
+        if missing_keys:
+            print("\n==================================================")
+            print("❌ [CRITICAL CONFIGURATION ERROR] UNFILLED PARAMETERS")
+            print("==================================================")
+            print("The following mandatory parameters are missing or empty in Column B:")
+            for m_key in missing_keys:
+                print(f"  --> {m_key}")
+            print("\n[Action Required]: Please reopen your Excel template, fill in these values,")
+            print("SAVE and CLOSE the file, and restart the simulator.")
+            print("==================================================\n")
+            sys.exit(1)
+            
+    except Exception as e:
+        raise RuntimeError(f"[Config Parse Error]: Failed to read parameters from Excel. Details: {e}")
 
     # ── STEP 2: GLOBAL SIMULATION RULES (TERMINAL INTERACTIVITY) ─────────────
     print("\n--------------------------------------------------")
@@ -103,7 +128,7 @@ def get_user_input():
         except ValueError:
             print("  Please enter a valid numeric value.")
 
-    # ── UPDATED NUMERIC SELECTION FOR DEGRADATION MODELS ──────────────────────
+    # ── NUMERIC SELECTION FOR DEGRADATION MODELS ──────────────────────
     print("\nSelect Failure Degradation Distribution Model:")
     print("  1 ── Weibull Distribution")
     print("  2 ── Normal (Gaussian) Distribution")
@@ -120,7 +145,7 @@ def get_user_input():
 
     # ── DYNAMICALLY GENERATE INTERACTIVE PARAMETER INPUTS ─────────────────────
     dist_params = {}
-    print(f"\n  Configure parameters for {dist_choice.upper()} distribution:")
+    print(f"\n   Configure parameters for {dist_choice.upper()} distribution:")
     
     if dist_choice == "weibull":
         while True:
@@ -164,43 +189,31 @@ def get_user_input():
             except ValueError:
                 print("      Please enter a valid numeric value.")
 
-    # ── STEP 3: OPERATIONAL SPEED/LOAD PROFILE ROWS EXCEL SHEET ────────────────
-    print(f"\n[Action Required] Opening operational load profile template: {os.path.basename(profile_file_path)}")
-    print("--> Define your sequence blocks (durations & speeds), then SAVE and CLOSE the file...")
-    open_file_safely(profile_file_path)
-
-    input("\nPress [ENTER] here in the terminal *ONLY AFTER* you have Saved and Closed the profile sheet...")
-    time.sleep(1.0)
-
-    # Pack everything back together for consumption by downstream modules
-    config = {
-        "machine_type": asset_meta["machine_type"],
-        "system": asset_meta["sub_system"],
-        "config_file_path": config_file_path,
-        "profile_file_path": profile_file_path,
+    # ── STEP 3: DYNAMICALLY ASK FOR RAW DATA MACHINE LOG FILE ──────────────────
+    print("\n--------------------------------------------------")
+    print("        CAPTURE RAW MACHINE TELEMETRY LOG")
+    print("--------------------------------------------------")
+    while True:
+        log_input = input("Enter path to raw machine log file (CSV or Excel format): ").strip()
+        log_input = log_input.strip("'\"")
         
-        "sampling_rate": int(df_cfg.loc["Sampling Rate", "User Selection Value"]),
-        "fault_location": str(df_cfg.loc["Fault Type", "User Selection Value"]).strip(),
-        "fault_size_start": float(df_cfg.loc["Fault Size", "User Selection Value"]),
-        "sample_duration": float(df_cfg.loc["Sampling Window (s)", "User Selection Value"]),
-        "sampling_interval": float(df_cfg.loc["Sampling Interval (s)", "User Selection Value"]),
-        
-        "run_duration_mins": run_duration_mins,
-        "run_duration_secs": run_duration_mins * 60.0,
-        "distribution": dist_choice,
-        "dist_params": dist_params
-    }
+        if os.path.exists(log_input):
+            machine_log_path = log_input
+            break
+        print(f"  [Error] File not found at path: {log_input}. Please try again.")
 
-    if "Outer Race Position" in df_cfg.index:
-        val = df_cfg.loc["Outer Race Position", "User Selection Value"]
-        config["or_position"] = int(val) if not pd.isna(val) else None
-    else:
-        config["or_position"] = None
+    # Populate final config dictionary values
+    config["sampling_rate"] = int(cfg_dict.get("Sampling Rate"))
+    config["fault_location"] = str(cfg_dict.get("Fault Type")).strip().lower()
+    config["fault_size_start"] = str(cfg_dict.get("Fault Size")).strip()
+    config["sample_duration"] = float(cfg_dict.get("Sampling Window (s)"))
+    config["sampling_interval"] = float(cfg_dict.get("Sampling Interval (s)"))
+    
+    config["machine_log_path"] = machine_log_path
+    config["run_duration_mins"] = run_duration_mins
+    config["run_duration_secs"] = round(run_duration_mins * 60.0, 4)
+    config["distribution"] = dist_choice
+    config["dist_params"] = dist_params
+    config["or_position"] = None
 
     return config
-
-
-if __name__ == "__main__":
-    cfg = get_user_input()
-    print("\nPipeline Complete. Exporting configuration profile dictionary context:")
-    print(cfg)

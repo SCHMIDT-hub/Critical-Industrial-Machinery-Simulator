@@ -112,3 +112,8 @@ FAULT_LOCATIONS = COMPONENTS["bearing"]["fault_locations"]
 OR_POSITIONS    = COMPONENTS["bearing"]["or_positions"]
 FAULT_SIZES     = COMPONENTS["bearing"]["fault_sizes"]
 SOURCE_DATA_DURATION = COMPONENTS["bearing"]["source_data_duration"]
+
+# ── TELEMETRY QUANTIZATION ANCHORS ────────────────────────────────────────
+# Valid target speeds matching your local Gearbox dataset files on disk.
+# Includes 0 for handling stationary/rest states defensively.
+VALID_GEARBOX_RPMS = [0, 1200, 1800, 2400]
